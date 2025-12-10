@@ -1,5 +1,37 @@
-# Name,     Type, SubType, Offset,  Size,     Flags
-nvs,        data, nvs,     0x9000,  0x6000,
-phy_init,   data, phy,     0xf000,  0x1000,
-factory,    app,  factory, 0x10000, 0x100000,
-corefs,     data, spiffs,  0x110000,0x2F0000,
+# CoreFS Partition Table für ESP32-C6 (4MB Flash)
+# WICHTIG: Alle Offsets und Größen müssen 4096-aligned sein!
+
+# Name,       Type,     SubType,   Offset,    Size,      Flags
+nvs,          data,     nvs,       0x9000,    0x6000,
+phy_init,     data,     phy,       0xf000,    0x1000,
+factory,      app,      factory,   0x10000,   0x100000,
+corefs,       data,     spiffs,    0x110000,  0x2F0000,
+
+# ERKLÄRUNG:
+# 
+# nvs (0x9000 - 0xF000):
+#   - Non-Volatile Storage für WiFi Config etc.
+#   - Größe: 24 KB (0x6000)
+#   - Offset: 36 KB (0x9000) - Standard ESP32 Location
+#
+# phy_init (0xF000 - 0x10000):
+#   - PHY Layer Kalibrierungs-Daten
+#   - Größe: 4 KB (0x1000)
+#   - Offset: 60 KB (0xF000)
+#
+# factory (0x10000 - 0x110000):
+#   - Main Application
+#   - Größe: 1024 KB (0x100000 = 1 MB)
+#   - Offset: 64 KB (0x10000) - Standard Boot Location
+#
+# corefs (0x110000 - 0x400000):
+#   - CoreFS Dateisystem
+#   - Größe: 3008 KB (0x2F0000)
+#   - Offset: 1088 KB (0x110000)
+#   - Bis Ende Flash (4 MB = 0x400000)
+#
+# VALIDIERUNG:
+# - Alle Offsets sind 4096 (0x1000) aligned ✓
+# - Alle Größen sind 4096 aligned ✓
+# - Kein Overlap zwischen Partitionen ✓
+# - Total: 0x9000 + 0x6000 + 0x1000 + 0x100000 + 0x2F0000 = 0x400000 (4MB) ✓

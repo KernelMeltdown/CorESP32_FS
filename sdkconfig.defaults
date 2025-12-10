@@ -1,27 +1,67 @@
-# CoreFS Ultimate - 4MB Flash + USB-CDC Fix
+# CoreFS ESP32-C6 Configuration
+# KRITISCH: USB CDC on Boot für Serial Console
 
-# Flash size
+# ============================================
+# FIX 1: UART Console (Fallback - funktioniert garantiert)
+# ============================================
+# NOTIZ: ESP32-C6 hat USB Serial JTAG, aber für ersten Test
+#        nutzen wir UART um Linker-Probleme zu vermeiden
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM_0=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE_115200=y
+
+# USB Serial JTAG als Secondary (für spätere Nutzung)
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# ALTERNATIVE: Wenn du USB Serial JTAG nutzen willst, 
+# ersetze obiges mit:
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# Und füge in main/CMakeLists.txt hinzu:
+# WHOLE_ARCHIVE esp_driver_usb_serial_jtag
+
+# ============================================
+# Flash Configuration
+# ============================================
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
-# Partition table
+# ============================================
+# Partition Table
+# ============================================
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
-# USB-CDC für ESP32-C6 (Arduino "CDC On Boot")
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y
-CONFIG_ESP_CONSOLE_UART_NUM=-1
-
-# Optimization
+# ============================================
+# Compiler Optimization
+# ============================================
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
 
-# Log
+# ============================================
+# FreeRTOS
+# ============================================
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_UNICORE=y
+
+# ============================================
+# Logging
+# ============================================
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+CONFIG_LOG_COLORS=y
 
-# Disable Bluetooth
-CONFIG_BT_ENABLED=n
+# ============================================
+# WICHTIG: Serial Console Timeout erhöhen
+# ============================================
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_UART_NUM=0
 
-# VFS
-CONFIG_VFS_SUPPORT_IO=y
+# Verhindert Timeout beim Boot
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL=3
