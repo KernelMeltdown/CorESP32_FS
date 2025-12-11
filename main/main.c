@@ -11,8 +11,8 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 
-// CoreFS Headers (werden später hinzugefügt)
-// #include "corefs.h"
+// CoreFS Headers
+#include "corefs.h"
 
 static const char* TAG = "main";
 
@@ -106,48 +106,96 @@ void app_main(void) {
     }
     
     // ========================================
-    // SCHRITT 4: CoreFS Format (Demo)
+    // SCHRITT 4: CoreFS Format
     // ========================================
     ESP_LOGI(TAG, "Formatting CoreFS...");
     
-    // TODO: Ersetze mit echtem corefs_format() wenn verfügbar
-    // ret = corefs_format(partition);
-    
-    // Demo: Erase ersten Sector
-    ret = esp_partition_erase_range(partition, 0, 4096);
+    ret = corefs_format(partition);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "✓ Format successful (demo)");
+        ESP_LOGI(TAG, "✓ Format successful");
     } else {
         ESP_LOGE(TAG, "✗ Format failed: %s", esp_err_to_name(ret));
         return;
     }
     
     // ========================================
-    // SCHRITT 5: CoreFS Mount (Demo)
+    // SCHRITT 5: CoreFS Mount
     // ========================================
     ESP_LOGI(TAG, "Mounting CoreFS...");
     
-    // TODO: Ersetze mit echtem corefs_mount() wenn verfügbar
-    // ret = corefs_mount(partition);
+    ret = corefs_mount(partition);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "✓ Mount successful");
+    } else {
+        ESP_LOGE(TAG, "✗ Mount failed: %s", esp_err_to_name(ret));
+        return;
+    }
     
-    ESP_LOGI(TAG, "✓ Mount successful (demo)");
+    // Get filesystem info
+    corefs_info_t info;
+    if (corefs_info(&info) == ESP_OK) {
+        ESP_LOGI(TAG, "Filesystem: %llu KB total, %llu KB used, %llu KB free",
+                 info.total_bytes / 1024, info.used_bytes / 1024, 
+                 info.free_bytes / 1024);
+    }
     
     // ========================================
     // SCHRITT 6: Test File Operations
     // ========================================
     ESP_LOGI(TAG, "\n=== Testing File Operations ===\n");
     
+    // Test 1: Create and write file
     ESP_LOGI(TAG, "Test 1: Create file");
-    // TODO: corefs_open("/test.txt", COREFS_O_CREAT | COREFS_O_WRONLY);
+    corefs_file_t* file = corefs_open("/test.txt", 
+                                      COREFS_O_CREAT | COREFS_O_WRONLY);
+    if (!file) {
+        ESP_LOGE(TAG, "✗ Failed to create file");
+    } else {
+        ESP_LOGI(TAG, "✓ File created");
+        
+        // Test 2: Write data
+        ESP_LOGI(TAG, "Test 2: Write data");
+        const char* data = "Hello CoreFS!\nThis is a test file.\n";
+        int written = corefs_write(file, data, strlen(data));
+        if (written > 0) {
+            ESP_LOGI(TAG, "✓ Wrote %d bytes", written);
+        } else {
+            ESP_LOGE(TAG, "✗ Write failed");
+        }
+        
+        corefs_close(file);
+    }
     
-    ESP_LOGI(TAG, "Test 2: Write data");
-    // TODO: corefs_write(file, data, size);
-    
+    // Test 3: Read file
     ESP_LOGI(TAG, "Test 3: Read file");
-    // TODO: corefs_read(file, buffer, size);
+    file = corefs_open("/test.txt", COREFS_O_RDONLY);
+    if (!file) {
+        ESP_LOGE(TAG, "✗ Failed to open file");
+    } else {
+        char buffer[128];
+        int read_bytes = corefs_read(file, buffer, sizeof(buffer) - 1);
+        if (read_bytes > 0) {
+            buffer[read_bytes] = '\0';
+            ESP_LOGI(TAG, "✓ Read %d bytes:", read_bytes);
+            printf("%s\n", buffer);
+        } else {
+            ESP_LOGE(TAG, "✗ Read failed");
+        }
+        
+        // Test 4: Close file
+        ESP_LOGI(TAG, "Test 4: Close file");
+        if (corefs_close(file) == ESP_OK) {
+            ESP_LOGI(TAG, "✓ File closed");
+        }
+    }
     
-    ESP_LOGI(TAG, "Test 4: Close file");
-    // TODO: corefs_close(file);
+    // Test 5: Check file exists
+    ESP_LOGI(TAG, "Test 5: Check existence");
+    if (corefs_exists("/test.txt")) {
+        ESP_LOGI(TAG, "✓ File exists");
+    } else {
+        ESP_LOGE(TAG, "✗ File not found");
+    }
     
     // ========================================
     // SCHRITT 7: Final Stats

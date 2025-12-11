@@ -1,20 +1,15 @@
+# CoreFS Component
+
 idf_component_register(
     SRCS 
         "src/corefs_core.c"
-        "src/corefs_superblock.c"
-        "src/corefs_file.c"
         "src/corefs_block.c"
         "src/corefs_btree.c"
         "src/corefs_inode.c"
-        "src/corefs_transaction.c"
-        "src/corefs_wear.c"
-        "src/corefs_mmap.c"
-        "src/corefs_recovery.c"
-        "src/corefs_vfs.c"
-        "src/corefs_crc32.c"
+        "src/corefs_file.c"
     INCLUDE_DIRS 
         "include"
-    REQUIRES
+    REQUIRES 
         esp_partition
-        vfs
+        esp_timer
 )

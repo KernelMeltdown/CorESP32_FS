@@ -1,21 +1,22 @@
 /**
- * corefs_btree.c - B-Tree Directory Index
- * 
- * CRITICAL FIXES:
- * - Added corefs_btree_load() for mount
- * - Proper initialization writes to flash
- * - Better magic number checking
- * - Improved error messages
+ * CoreFS - B-Tree Directory Index
  */
 
-#include "corefs.h"
+#include "corefs_types.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char* TAG = "corefs_btree";
 
-// FNV-1a hash function
+// Forward declarations
+extern esp_err_t corefs_block_read(corefs_ctx_t* ctx, uint32_t block, void* buf);
+extern esp_err_t corefs_block_write(corefs_ctx_t* ctx, uint32_t block, const void* buf);
+
+// ============================================
+// HASH FUNCTION (FNV-1a)
+// ============================================
+
 static uint32_t hash_name(const char* name) {
     uint32_t hash = 2166136261u;
     while (*name) {
@@ -25,293 +26,223 @@ static uint32_t hash_name(const char* name) {
     return hash;
 }
 
-// ============================================================================
-// INITIALIZATION (called during format)
-// ============================================================================
+// ============================================
+// INITIALIZATION
+// ============================================
 
 esp_err_t corefs_btree_init(corefs_ctx_t* ctx) {
-    if (!ctx || !ctx->sb) {
-        ESP_LOGE(TAG, "Invalid context");
+    if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    ESP_LOGI(TAG, "Initializing B-Tree root at block %lu", ctx->sb->root_block);
-    
-    // Allocate root node
+    // Create empty root node
     corefs_btree_node_t* root = calloc(1, sizeof(corefs_btree_node_t));
     if (!root) {
-        ESP_LOGE(TAG, "Failed to allocate B-Tree root node");
         return ESP_ERR_NO_MEM;
     }
     
-    // Initialize root node
-    root->magic = COREFS_BLOCK_MAGIC;
+    root->magic = COREFS_BTREE_MAGIC;
     root->type = 1;  // Leaf node
     root->count = 0;
     root->parent = 0;
     
-    // Initialize all children to 0
-    for (int i = 0; i < COREFS_BTREE_ORDER; i++) {
-        root->children[i] = 0;
-    }
-    
-    // *** CRITICAL: Write root node to flash ***
-    ESP_LOGI(TAG, "Writing B-Tree root to flash (magic: 0x%lX, type: %d)", 
-             root->magic, root->type);
-    
+    // Write to block 1
     esp_err_t ret = corefs_block_write(ctx, ctx->sb->root_block, root);
     free(root);
     
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "B-Tree root initialized at block %lu", ctx->sb->root_block);
-    } else {
-        ESP_LOGE(TAG, "Failed to write B-Tree root: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "B-Tree initialized");
     }
     
     return ret;
 }
 
-// ============================================================================
-// LOAD (called during mount) - NEW!
-// ============================================================================
-
 esp_err_t corefs_btree_load(corefs_ctx_t* ctx) {
-    if (!ctx || !ctx->sb) {
-        ESP_LOGE(TAG, "Invalid context");
+    if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    ESP_LOGI(TAG, "Loading B-Tree root from block %lu", ctx->sb->root_block);
-    
-    // Allocate node buffer
-    corefs_btree_node_t* node = malloc(sizeof(corefs_btree_node_t));
-    if (!node) {
-        ESP_LOGE(TAG, "Failed to allocate B-Tree node");
+    // Read root node to verify it exists
+    corefs_btree_node_t* root = calloc(1, sizeof(corefs_btree_node_t));
+    if (!root) {
         return ESP_ERR_NO_MEM;
     }
     
-    // Read root node from flash
-    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, node);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read B-Tree root: %s", esp_err_to_name(ret));
-        free(node);
-        return ret;
+    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, root);
+    if (ret == ESP_OK) {
+        if (root->magic != COREFS_BTREE_MAGIC) {
+            ESP_LOGE(TAG, "Invalid B-Tree root magic");
+            ret = ESP_ERR_INVALID_STATE;
+        } else {
+            ESP_LOGI(TAG, "B-Tree loaded: %u entries", root->count);
+        }
     }
     
-    // Verify magic
-    if (node->magic != COREFS_BLOCK_MAGIC) {
-        ESP_LOGE(TAG, "B-Tree root corrupted (magic: 0x%lX, expected: 0x%lX)", 
-                 node->magic, COREFS_BLOCK_MAGIC);
-        free(node);
-        return ESP_ERR_INVALID_CRC;
-    }
-    
-    ESP_LOGI(TAG, "B-Tree loaded: type=%d, count=%d entries", 
-             node->type, node->count);
-    
-    free(node);
-    return ESP_OK;
+    free(root);
+    return ret;
 }
 
-// ============================================================================
+// ============================================
 // FIND
-// ============================================================================
+// ============================================
 
-uint32_t corefs_btree_find(corefs_ctx_t* ctx, const char* path) {
-    if (!ctx || !path || path[0] != '/' || !ctx->sb) {
-        ESP_LOGE(TAG, "Invalid parameters for B-Tree find");
-        return 0;
+int32_t corefs_btree_find(corefs_ctx_t* ctx, const char* path) {
+    if (!ctx || !path || path[0] != '/') {
+        return -1;
     }
     
-    // Allocate node buffer
-    corefs_btree_node_t* node = malloc(sizeof(corefs_btree_node_t));
+    // Extract filename (skip leading '/')
+    const char* filename = path + 1;
+    if (strlen(filename) == 0) {
+        return -1;  // Root directory not supported yet
+    }
+    
+    // Read root node
+    corefs_btree_node_t* node = calloc(1, sizeof(corefs_btree_node_t));
     if (!node) {
-        ESP_LOGE(TAG, "Failed to allocate B-Tree node");
-        return 0;
+        return -1;
     }
     
-    // Read root node from flash
     esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, node);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read B-Tree root: %s", esp_err_to_name(ret));
         free(node);
-        return 0;
+        return -1;
     }
     
-    // Verify magic
-    if (node->magic != COREFS_BLOCK_MAGIC) {
-        ESP_LOGW(TAG, "B-Tree root not initialized (magic: 0x%lX), empty tree", 
-                 node->magic);
-        free(node);
-        return 0;
-    }
+    // Search in root (simple linear search for now)
+    uint32_t hash = hash_name(filename);
     
-    // Compute hash
-    uint32_t hash = hash_name(path);
-    
-    ESP_LOGD(TAG, "Searching for '%s' (hash: 0x%lX) in %d entries", 
-             path, hash, node->count);
-    
-    // Linear search in root node
     for (int i = 0; i < node->count; i++) {
-        if (node->entries[i].name_hash == hash && 
-            strcmp(node->entries[i].name, path) == 0) {
+        if (node->entries[i].name_hash == hash &&
+            strcmp(node->entries[i].name, filename) == 0) {
             
-            uint32_t inode_block = node->entries[i].inode;
-            ESP_LOGD(TAG, "Found '%s' → inode block %lu", path, inode_block);
+            uint32_t inode_block = node->entries[i].inode_block;
             free(node);
             return inode_block;
         }
     }
     
-    // Not found
-    ESP_LOGD(TAG, "File '%s' not found in B-Tree", path);
     free(node);
-    return 0;
+    return -1;  // Not found
 }
 
-// ============================================================================
+// ============================================
 // INSERT
-// ============================================================================
+// ============================================
 
 esp_err_t corefs_btree_insert(corefs_ctx_t* ctx, const char* path, uint32_t inode_block) {
-    if (!ctx || !path || path[0] != '/' || !ctx->sb) {
-        ESP_LOGE(TAG, "Invalid parameters for B-Tree insert");
+    if (!ctx || !path || path[0] != '/') {
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Allocate node buffer
-    corefs_btree_node_t* root = malloc(sizeof(corefs_btree_node_t));
-    if (!root) {
-        ESP_LOGE(TAG, "Failed to allocate B-Tree node");
+    // Extract filename
+    const char* filename = path + 1;
+    if (strlen(filename) >= COREFS_MAX_FILENAME) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    // Read root node
+    corefs_btree_node_t* node = calloc(1, sizeof(corefs_btree_node_t));
+    if (!node) {
         return ESP_ERR_NO_MEM;
     }
     
-    // Read current root from flash
-    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, root);
+    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, node);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read B-Tree root: %s", esp_err_to_name(ret));
-        free(root);
+        free(node);
         return ret;
     }
     
-    // Verify magic
-    if (root->magic != COREFS_BLOCK_MAGIC) {
-        ESP_LOGE(TAG, "B-Tree root corrupted (magic: 0x%lX)", root->magic);
-        free(root);
-        return ESP_ERR_INVALID_CRC;
-    }
-    
     // Check if node is full
-    if (root->count >= COREFS_BTREE_ORDER - 1) {
-        ESP_LOGE(TAG, "B-Tree node full (%d/%d), node split not implemented", 
-                 root->count, COREFS_BTREE_ORDER - 1);
-        free(root);
+    if (node->count >= (COREFS_BTREE_ORDER - 1)) {
+        ESP_LOGE(TAG, "B-Tree node full (split not implemented)");
+        free(node);
         return ESP_ERR_NO_MEM;
     }
     
     // Check for duplicate
-    uint32_t hash = hash_name(path);
-    for (int i = 0; i < root->count; i++) {
-        if (root->entries[i].name_hash == hash && 
-            strcmp(root->entries[i].name, path) == 0) {
-            ESP_LOGW(TAG, "File '%s' already exists in B-Tree", path);
-            free(root);
-            return ESP_ERR_INVALID_STATE;
+    uint32_t hash = hash_name(filename);
+    for (int i = 0; i < node->count; i++) {
+        if (node->entries[i].name_hash == hash &&
+            strcmp(node->entries[i].name, filename) == 0) {
+            free(node);
+            return ESP_ERR_INVALID_STATE;  // Already exists
         }
     }
     
-    // Add new entry
-    int idx = root->count;
-    root->entries[idx].inode = inode_block;
-    root->entries[idx].name_hash = hash;
-    strncpy(root->entries[idx].name, path, sizeof(root->entries[idx].name) - 1);
-    root->entries[idx].name[sizeof(root->entries[idx].name) - 1] = '\0';
-    root->count++;
+    // Insert entry
+    int idx = node->count;
+    node->entries[idx].inode_block = inode_block;
+    node->entries[idx].name_hash = hash;
+    strncpy(node->entries[idx].name, filename, COREFS_MAX_FILENAME - 1);
+    node->entries[idx].name[COREFS_MAX_FILENAME - 1] = '\0';
+    node->count++;
     
-    ESP_LOGI(TAG, "Inserting '%s' → inode block %lu (entry %d/%d)", 
-             path, inode_block, idx + 1, COREFS_BTREE_ORDER - 1);
+    // Write back
+    ret = corefs_block_write(ctx, ctx->sb->root_block, node);
+    free(node);
     
-    // Write back to flash
-    ret = corefs_block_write(ctx, ctx->sb->root_block, root);
-    free(root);
-    
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write B-Tree root: %s", esp_err_to_name(ret));
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Inserted '%s' -> inode block %u", filename, inode_block);
     }
     
     return ret;
 }
 
-// ============================================================================
+// ============================================
 // DELETE
-// ============================================================================
+// ============================================
 
 esp_err_t corefs_btree_delete(corefs_ctx_t* ctx, const char* path) {
-    if (!ctx || !path || path[0] != '/' || !ctx->sb) {
-        ESP_LOGE(TAG, "Invalid parameters for B-Tree delete");
+    if (!ctx || !path || path[0] != '/') {
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Allocate node buffer
-    corefs_btree_node_t* root = malloc(sizeof(corefs_btree_node_t));
-    if (!root) {
-        ESP_LOGE(TAG, "Failed to allocate B-Tree node");
+    const char* filename = path + 1;
+    
+    // Read root node
+    corefs_btree_node_t* node = calloc(1, sizeof(corefs_btree_node_t));
+    if (!node) {
         return ESP_ERR_NO_MEM;
     }
     
-    // Read current root from flash
-    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, root);
+    esp_err_t ret = corefs_block_read(ctx, ctx->sb->root_block, node);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read B-Tree root: %s", esp_err_to_name(ret));
-        free(root);
+        free(node);
         return ret;
     }
     
-    // Verify magic
-    if (root->magic != COREFS_BLOCK_MAGIC) {
-        ESP_LOGE(TAG, "B-Tree root corrupted (magic: 0x%lX)", root->magic);
-        free(root);
-        return ESP_ERR_INVALID_CRC;
-    }
+    // Find entry
+    uint32_t hash = hash_name(filename);
+    int found_idx = -1;
     
-    // Find and remove entry
-    uint32_t hash = hash_name(path);
-    bool found = false;
-    
-    for (int i = 0; i < root->count; i++) {
-        if (root->entries[i].name_hash == hash && 
-            strcmp(root->entries[i].name, path) == 0) {
-            
-            ESP_LOGI(TAG, "Deleting '%s' from B-Tree (entry %d)", path, i);
-            
-            // Shift remaining entries left
-            if (i < root->count - 1) {
-                memmove(&root->entries[i], 
-                        &root->entries[i + 1],
-                        (root->count - i - 1) * sizeof(root->entries[0]));
-            }
-            
-            // Clear last entry
-            memset(&root->entries[root->count - 1], 0, sizeof(root->entries[0]));
-            root->count--;
-            found = true;
+    for (int i = 0; i < node->count; i++) {
+        if (node->entries[i].name_hash == hash &&
+            strcmp(node->entries[i].name, filename) == 0) {
+            found_idx = i;
             break;
         }
     }
     
-    if (!found) {
-        ESP_LOGW(TAG, "File '%s' not found in B-Tree for deletion", path);
-        free(root);
+    if (found_idx < 0) {
+        free(node);
         return ESP_ERR_NOT_FOUND;
     }
     
-    // Write back to flash
-    ret = corefs_block_write(ctx, ctx->sb->root_block, root);
-    free(root);
+    // Shift remaining entries
+    if (found_idx < node->count - 1) {
+        memmove(&node->entries[found_idx], 
+                &node->entries[found_idx + 1],
+                (node->count - found_idx - 1) * sizeof(node->entries[0]));
+    }
+    node->count--;
     
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write B-Tree root: %s", esp_err_to_name(ret));
+    // Write back
+    ret = corefs_block_write(ctx, ctx->sb->root_block, node);
+    free(node);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Deleted '%s'", filename);
     }
     
     return ret;

@@ -1,412 +1,423 @@
 /**
- * corefs_file.c - File Operations (Open/Read/Write/Close)
- * 
- * CRITICAL FIX: Removed duplicate corefs_format/mount/unmount
- * Those are now ONLY in corefs_core.c
- * 
- * This file only contains file-level operations
+ * CoreFS - File Operations
  */
 
 #include "corefs.h"
+#include "corefs_types.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char* TAG = "corefs_file";
 
-// External global context (defined in corefs_core.c)
-extern corefs_ctx_t g_ctx;
+// Forward declarations
+extern corefs_ctx_t* corefs_get_context(void);
+extern int32_t corefs_btree_find(corefs_ctx_t* ctx, const char* path);
+extern esp_err_t corefs_btree_insert(corefs_ctx_t* ctx, const char* path, uint32_t inode_block);
+extern esp_err_t corefs_btree_delete(corefs_ctx_t* ctx, const char* path);
+extern esp_err_t corefs_inode_create(corefs_ctx_t* ctx, const char* filename, uint32_t* out_inode_block);
+extern esp_err_t corefs_inode_read(corefs_ctx_t* ctx, uint32_t inode_block, corefs_inode_t* inode);
+extern esp_err_t corefs_inode_write(corefs_ctx_t* ctx, uint32_t inode_block, const corefs_inode_t* inode);
+extern esp_err_t corefs_inode_delete(corefs_ctx_t* ctx, uint32_t inode_block);
+extern uint32_t corefs_block_alloc(corefs_ctx_t* ctx);
+extern void corefs_block_free(corefs_ctx_t* ctx, uint32_t block);
+extern esp_err_t corefs_block_read(corefs_ctx_t* ctx, uint32_t block, void* buf);
+extern esp_err_t corefs_block_write(corefs_ctx_t* ctx, uint32_t block, const void* buf);
 
-// ============================================================================
-// FILE OPERATIONS
-// ============================================================================
+// ============================================
+// OPEN
+// ============================================
 
-/**
- * Open file
- */
 corefs_file_t* corefs_open(const char* path, uint32_t flags) {
-    if (!g_ctx.mounted || !path) {
-        ESP_LOGE(TAG, "Not mounted or invalid path");
+    corefs_ctx_t* ctx = corefs_get_context();
+    
+    if (!ctx->mounted || !path) {
         return NULL;
     }
     
-    // Validate path
-    if (path[0] != '/') {
-        ESP_LOGE(TAG, "Path must start with /: %s", path);
-        return NULL;
-    }
-    
-    // Find free file handle
-    int fd = -1;
+    // Find free file slot
+    int slot = -1;
     for (int i = 0; i < COREFS_MAX_OPEN_FILES; i++) {
-        if (g_ctx.open_files[i] == NULL) {
-            fd = i;
+        if (ctx->open_files[i] == NULL) {
+            slot = i;
             break;
         }
     }
     
-    if (fd < 0) {
+    if (slot < 0) {
         ESP_LOGE(TAG, "Too many open files");
         return NULL;
     }
     
-    // Try to find existing file
-    uint32_t inode_block = corefs_btree_find(&g_ctx, path);
+    // Extract filename
+    const char* filename = path + 1;  // Skip leading '/'
     
-    corefs_file_t* file = calloc(1, sizeof(corefs_file_t));
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to allocate file handle");
+    // Try to find existing file
+    int32_t inode_block = corefs_btree_find(ctx, path);
+    
+    // If not found and CREAT flag set, create new
+    if (inode_block < 0 && (flags & COREFS_O_CREAT)) {
+        uint32_t new_inode_block = 0;
+        esp_err_t ret = corefs_inode_create(ctx, filename, &new_inode_block);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create inode: %s", esp_err_to_name(ret));
+            return NULL;
+        }
+        
+        // Insert into B-Tree
+        ret = corefs_btree_insert(ctx, path, new_inode_block);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to insert into B-Tree: %s", esp_err_to_name(ret));
+            corefs_inode_delete(ctx, new_inode_block);
+            return NULL;
+        }
+        
+        inode_block = new_inode_block;
+    }
+    
+    if (inode_block < 0) {
+        ESP_LOGE(TAG, "File not found: %s", path);
         return NULL;
     }
     
-    strncpy(file->path, path, COREFS_MAX_PATH - 1);
-    file->path[COREFS_MAX_PATH - 1] = '\0';
-    file->flags = flags;
-    file->offset = 0;
-    file->valid = true;
-    
-    if (inode_block == 0) {
-        // File doesn't exist
-        if (!(flags & COREFS_O_CREAT)) {
-            ESP_LOGE(TAG, "File not found: %s", path);
-            free(file);
-            return NULL;
-        }
-        
-        // Create new file
-        corefs_inode_t* inode = NULL;
-        esp_err_t ret = corefs_inode_create(&g_ctx, path, &inode, &inode_block);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to create inode for %s", path);
-            free(file);
-            return NULL;
-        }
-        
-        file->inode = inode;
-        file->inode_block = inode_block;
-        
-        // Add to B-Tree
-        ret = corefs_btree_insert(&g_ctx, path, inode_block);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to insert into B-Tree");
-            free(inode);
-            free(file);
-            return NULL;
-        }
-        
-        ESP_LOGI(TAG, "Created file '%s' at inode block %lu", path, inode_block);
-    } else {
-        // File exists - load inode
-        corefs_inode_t* inode = malloc(sizeof(corefs_inode_t));
-        if (!inode) {
-            ESP_LOGE(TAG, "Failed to allocate inode");
-            free(file);
-            return NULL;
-        }
-        
-        esp_err_t ret = corefs_inode_read(&g_ctx, inode_block, inode);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read inode from block %lu", inode_block);
-            free(inode);
-            free(file);
-            return NULL;
-        }
-        
-        file->inode = inode;
-        file->inode_block = inode_block;
-        
-        // Handle truncate flag
-        if (flags & COREFS_O_TRUNC) {
-            inode->size = 0;
-            inode->blocks_used = 0;
-            ret = corefs_inode_write(&g_ctx, inode_block, inode);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to truncate file");
-            }
-        }
-        
-        // Handle append flag
-        if (flags & COREFS_O_APPEND) {
-            file->offset = inode->size;
-        }
-        
-        ESP_LOGI(TAG, "Opened file '%s' (size %llu bytes)", path, inode->size);
+    // Allocate file handle
+    corefs_file_t* file = calloc(1, sizeof(corefs_file_t));
+    if (!file) {
+        return NULL;
     }
     
-    g_ctx.open_files[fd] = file;
+    // Load inode
+    file->inode = malloc(sizeof(corefs_inode_t));
+    if (!file->inode) {
+        free(file);
+        return NULL;
+    }
+    
+    esp_err_t ret = corefs_inode_read(ctx, inode_block, file->inode);
+    if (ret != ESP_OK) {
+        free(file->inode);
+        free(file);
+        return NULL;
+    }
+    
+    // Setup file handle
+    strncpy(file->path, path, sizeof(file->path) - 1);
+    file->inode_block = inode_block;
+    file->position = 0;
+    file->flags = flags;
+    file->dirty = false;
+    
+    // Truncate if requested
+    if (flags & COREFS_O_TRUNC) {
+        // Free all data blocks
+        for (uint32_t i = 0; i < file->inode->blocks_used; i++) {
+            if (file->inode->block_list[i] != 0) {
+                corefs_block_free(ctx, file->inode->block_list[i]);
+            }
+        }
+        file->inode->size = 0;
+        file->inode->blocks_used = 0;
+        memset(file->inode->block_list, 0, sizeof(file->inode->block_list));
+        file->dirty = true;
+    }
+    
+    // Append: seek to end
+    if (flags & COREFS_O_APPEND) {
+        file->position = file->inode->size;
+    }
+    
+    ctx->open_files[slot] = file;
+    
+    ESP_LOGD(TAG, "Opened '%s' at inode block %u (size: %llu)", 
+             path, inode_block, file->inode->size);
+    
     return file;
 }
 
-/**
- * Read from file
- */
+// ============================================
+// READ
+// ============================================
+
 int corefs_read(corefs_file_t* file, void* buf, size_t size) {
-    if (!file || !file->valid || !buf || !file->inode) {
-        ESP_LOGE(TAG, "Invalid file handle or buffer");
+    if (!file || !file->inode || !buf) {
         return -1;
     }
     
-    if (file->offset >= file->inode->size) {
-        return 0;  // EOF
+    corefs_ctx_t* ctx = corefs_get_context();
+    if (!ctx->mounted) {
+        return -1;
     }
     
-    // Limit read to available data
-    size_t to_read = size;
-    if (file->offset + to_read > file->inode->size) {
-        to_read = file->inode->size - file->offset;
+    // Check read permission
+    if ((file->flags & COREFS_O_WRONLY) && !(file->flags & COREFS_O_RDWR)) {
+        ESP_LOGE(TAG, "File not open for reading");
+        return -1;
+    }
+    
+    // Check EOF
+    if (file->position >= file->inode->size) {
+        return 0;
+    }
+    
+    // Limit to available data
+    size_t available = file->inode->size - file->position;
+    if (size > available) {
+        size = available;
     }
     
     size_t total_read = 0;
-    uint8_t* dest = (uint8_t*)buf;
+    uint8_t* dst = (uint8_t*)buf;
     
-    while (to_read > 0) {
-        uint32_t block_idx = file->offset / COREFS_BLOCK_SIZE;
-        uint32_t block_offset = file->offset % COREFS_BLOCK_SIZE;
+    // Allocate block buffer
+    uint8_t* block_buf = malloc(COREFS_BLOCK_SIZE);
+    if (!block_buf) {
+        return -1;
+    }
+    
+    while (size > 0 && file->position < file->inode->size) {
+        uint32_t block_idx = file->position / COREFS_BLOCK_SIZE;
+        uint32_t block_offset = file->position % COREFS_BLOCK_SIZE;
         
         if (block_idx >= file->inode->blocks_used) {
-            break;  // No more blocks
+            break;
         }
         
         uint32_t block_num = file->inode->block_list[block_idx];
         if (block_num == 0) {
-            ESP_LOGW(TAG, "Null block in file at index %lu", block_idx);
             break;
         }
         
         // Read block
-        uint8_t block_buf[COREFS_BLOCK_SIZE];
-        esp_err_t ret = corefs_block_read(&g_ctx, block_num, block_buf);
+        esp_err_t ret = corefs_block_read(ctx, block_num, block_buf);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read block %lu", block_num);
-            break;
+            free(block_buf);
+            return -1;
         }
         
         // Copy data
-        size_t chunk = COREFS_BLOCK_SIZE - block_offset;
-        if (chunk > to_read) {
-            chunk = to_read;
+        size_t to_read = COREFS_BLOCK_SIZE - block_offset;
+        if (to_read > size) {
+            to_read = size;
         }
         
-        memcpy(dest, block_buf + block_offset, chunk);
+        memcpy(dst, block_buf + block_offset, to_read);
         
-        dest += chunk;
-        file->offset += chunk;
-        total_read += chunk;
-        to_read -= chunk;
+        dst += to_read;
+        file->position += to_read;
+        total_read += to_read;
+        size -= to_read;
     }
     
-    return total_read;
+    free(block_buf);
+    return (int)total_read;
 }
 
-/**
- * Write to file
- */
+// ============================================
+// WRITE
+// ============================================
+
 int corefs_write(corefs_file_t* file, const void* buf, size_t size) {
-    if (!file || !file->valid || !buf || !file->inode) {
-        ESP_LOGE(TAG, "Invalid file handle or buffer");
+    if (!file || !file->inode || !buf) {
+        return -1;
+    }
+    
+    corefs_ctx_t* ctx = corefs_get_context();
+    if (!ctx->mounted) {
+        return -1;
+    }
+    
+    // Check write permission
+    if ((file->flags & COREFS_O_RDONLY)) {
+        ESP_LOGE(TAG, "File not open for writing");
         return -1;
     }
     
     size_t total_written = 0;
     const uint8_t* src = (const uint8_t*)buf;
     
+    // Allocate block buffer
+    uint8_t* block_buf = malloc(COREFS_BLOCK_SIZE);
+    if (!block_buf) {
+        return -1;
+    }
+    
     while (size > 0) {
-        uint32_t block_idx = file->offset / COREFS_BLOCK_SIZE;
-        uint32_t block_offset = file->offset % COREFS_BLOCK_SIZE;
+        uint32_t block_idx = file->position / COREFS_BLOCK_SIZE;
+        uint32_t block_offset = file->position % COREFS_BLOCK_SIZE;
         
-        if (block_idx >= COREFS_MAX_FILE_BLOCKS) {
-            ESP_LOGE(TAG, "File too large (max %u blocks = %u KB)", 
-                     COREFS_MAX_FILE_BLOCKS, 
-                     COREFS_MAX_FILE_BLOCKS * COREFS_BLOCK_SIZE / 1024);
-            break;
-        }
-        
-        // Allocate new block if needed
+        // Check if we need a new block
         if (block_idx >= file->inode->blocks_used) {
-            uint32_t new_block = corefs_block_alloc(&g_ctx);
-            if (new_block == 0) {
-                ESP_LOGE(TAG, "No free blocks available");
-                break;
+            if (block_idx >= COREFS_MAX_BLOCKS) {
+                ESP_LOGE(TAG, "File too large (max %u blocks)", COREFS_MAX_BLOCKS);
+                free(block_buf);
+                return (total_written > 0) ? (int)total_written : -1;
             }
             
-            file->inode->block_list[file->inode->blocks_used] = new_block;
-            file->inode->blocks_used++;
+            // Allocate new block
+            uint32_t new_block = corefs_block_alloc(ctx);
+            if (new_block == 0) {
+                ESP_LOGE(TAG, "No free blocks");
+                free(block_buf);
+                return (total_written > 0) ? (int)total_written : -1;
+            }
             
-            ESP_LOGD(TAG, "Allocated block %lu for file (index %lu)", 
-                     new_block, block_idx);
+            file->inode->block_list[block_idx] = new_block;
+            file->inode->blocks_used++;
         }
         
         uint32_t block_num = file->inode->block_list[block_idx];
         
-        // Read existing block data (for partial writes)
-        uint8_t block_buf[COREFS_BLOCK_SIZE];
+        // Read-modify-write
         memset(block_buf, 0, COREFS_BLOCK_SIZE);
-        
-        if (block_offset > 0 || size < COREFS_BLOCK_SIZE) {
-            esp_err_t ret = corefs_block_read(&g_ctx, block_num, block_buf);
-            if (ret != ESP_OK) {
-                // Block might be new, continue
-                ESP_LOGD(TAG, "New block %lu, no need to read", block_num);
-            }
+        if (block_offset != 0 || size < COREFS_BLOCK_SIZE) {
+            // Partial block write - read existing data
+            corefs_block_read(ctx, block_num, block_buf);
         }
         
         // Copy new data
-        size_t chunk = COREFS_BLOCK_SIZE - block_offset;
-        if (chunk > size) {
-            chunk = size;
+        size_t to_write = COREFS_BLOCK_SIZE - block_offset;
+        if (to_write > size) {
+            to_write = size;
         }
         
-        memcpy(block_buf + block_offset, src, chunk);
+        memcpy(block_buf + block_offset, src, to_write);
         
         // Write block
-        esp_err_t ret = corefs_block_write(&g_ctx, block_num, block_buf);
+        esp_err_t ret = corefs_block_write(ctx, block_num, block_buf);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to write block %lu", block_num);
-            break;
+            free(block_buf);
+            return (total_written > 0) ? (int)total_written : -1;
         }
         
-        src += chunk;
-        file->offset += chunk;
-        total_written += chunk;
-        size -= chunk;
+        src += to_write;
+        file->position += to_write;
+        total_written += to_write;
+        size -= to_write;
         
         // Update file size
-        if (file->offset > file->inode->size) {
-            file->inode->size = file->offset;
+        if (file->position > file->inode->size) {
+            file->inode->size = file->position;
         }
     }
     
-    // Update inode on flash
-    if (total_written > 0) {
-        esp_err_t ret = corefs_inode_write(&g_ctx, file->inode_block, file->inode);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to update inode");
-        }
-    }
+    free(block_buf);
+    file->dirty = true;
     
-    return total_written;
+    return (int)total_written;
 }
 
-/**
- * Seek in file
- */
+// ============================================
+// SEEK
+// ============================================
+
 int corefs_seek(corefs_file_t* file, int offset, int whence) {
-    if (!file || !file->valid || !file->inode) {
+    if (!file || !file->inode) {
         return -1;
     }
     
-    int new_offset;
+    int new_pos = file->position;
     
     switch (whence) {
         case COREFS_SEEK_SET:
-            new_offset = offset;
+            new_pos = offset;
             break;
         case COREFS_SEEK_CUR:
-            new_offset = file->offset + offset;
+            new_pos += offset;
             break;
         case COREFS_SEEK_END:
-            new_offset = file->inode->size + offset;
+            new_pos = file->inode->size + offset;
             break;
         default:
-            ESP_LOGE(TAG, "Invalid whence: %d", whence);
             return -1;
     }
     
-    if (new_offset < 0 || (size_t)new_offset > file->inode->size) {
-        ESP_LOGE(TAG, "Seek out of bounds: %d (size: %llu)", 
-                 new_offset, file->inode->size);
-        return -1;
+    if (new_pos < 0) {
+        new_pos = 0;
     }
     
-    file->offset = new_offset;
-    return 0;
+    file->position = new_pos;
+    return new_pos;
 }
 
-/**
- * Get current position
- */
 size_t corefs_tell(corefs_file_t* file) {
-    if (!file || !file->valid) {
-        return 0;
-    }
-    return file->offset;
+    return file ? file->position : 0;
 }
 
-/**
- * Get file size
- */
 size_t corefs_size(corefs_file_t* file) {
-    if (!file || !file->valid || !file->inode) {
-        return 0;
-    }
-    return file->inode->size;
+    return (file && file->inode) ? file->inode->size : 0;
 }
 
-/**
- * Close file
- */
+// ============================================
+// CLOSE
+// ============================================
+
 esp_err_t corefs_close(corefs_file_t* file) {
-    if (!file || !file->valid) {
+    if (!file) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Find file in open files array
+    corefs_ctx_t* ctx = corefs_get_context();
+    
+    // Write inode if modified
+    if (file->dirty) {
+        corefs_inode_write(ctx, file->inode_block, file->inode);
+    }
+    
+    // Remove from open files
     for (int i = 0; i < COREFS_MAX_OPEN_FILES; i++) {
-        if (g_ctx.open_files[i] == file) {
-            g_ctx.open_files[i] = NULL;
+        if (ctx->open_files[i] == file) {
+            ctx->open_files[i] = NULL;
             break;
         }
     }
     
+    // Free resources
     if (file->inode) {
         free(file->inode);
     }
-    
-    file->valid = false;
     free(file);
     
-    ESP_LOGD(TAG, "File closed");
     return ESP_OK;
 }
 
-/**
- * Delete file
- */
+// ============================================
+// FILE MANAGEMENT
+// ============================================
+
 esp_err_t corefs_unlink(const char* path) {
-    if (!g_ctx.mounted || !path) {
+    corefs_ctx_t* ctx = corefs_get_context();
+    
+    if (!ctx->mounted || !path) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    uint32_t inode_block = corefs_btree_find(&g_ctx, path);
-    if (inode_block == 0) {
-        ESP_LOGE(TAG, "File not found: %s", path);
+    // Find file
+    int32_t inode_block = corefs_btree_find(ctx, path);
+    if (inode_block < 0) {
         return ESP_ERR_NOT_FOUND;
     }
     
-    // Delete inode (frees all blocks)
-    esp_err_t ret = corefs_inode_delete(&g_ctx, inode_block);
+    // Delete inode (frees all data blocks)
+    esp_err_t ret = corefs_inode_delete(ctx, inode_block);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to delete inode");
         return ret;
     }
     
     // Remove from B-Tree
-    ret = corefs_btree_delete(&g_ctx, path);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to remove from B-Tree");
-    }
-    
-    ESP_LOGI(TAG, "Deleted file '%s'", path);
-    return ESP_OK;
+    return corefs_btree_delete(ctx, path);
 }
 
-/**
- * Check if file exists
- */
 bool corefs_exists(const char* path) {
-    if (!g_ctx.mounted || !path) {
+    corefs_ctx_t* ctx = corefs_get_context();
+    
+    if (!ctx->mounted || !path) {
         return false;
     }
     
-    return (corefs_btree_find(&g_ctx, path) != 0);
+    return corefs_btree_find(ctx, path) >= 0;
+}
+
+esp_err_t corefs_rename(const char* old_path, const char* new_path) {
+    // TODO: Implement rename
+    return ESP_ERR_NOT_SUPPORTED;
 }
