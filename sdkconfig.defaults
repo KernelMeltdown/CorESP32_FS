@@ -1,32 +1,12 @@
-# CoreFS ESP32-C6 Configuration
-# KRITISCH: USB CDC on Boot für Serial Console
+# CoreFS Ultimate - Build Configuration
+# ESP32-C6, 4MB Flash, USB CDC Console
 
 # ============================================
-# FIX 1: UART Console (Fallback - funktioniert garantiert)
+# Target & Flash
 # ============================================
-# NOTIZ: ESP32-C6 hat USB Serial JTAG, aber für ersten Test
-#        nutzen wir UART um Linker-Probleme zu vermeiden
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_UART_NUM_0=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE_115200=y
-
-# USB Serial JTAG als Secondary (für spätere Nutzung)
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
-
-# ALTERNATIVE: Wenn du USB Serial JTAG nutzen willst, 
-# ersetze obiges mit:
-# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-# CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
-# Und füge in main/CMakeLists.txt hinzu:
-# WHOLE_ARCHIVE esp_driver_usb_serial_jtag
-
-# ============================================
-# Flash Configuration
-# ============================================
+CONFIG_IDF_TARGET="esp32c6"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
-CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
 # ============================================
 # Partition Table
@@ -34,34 +14,46 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# ============================================
+# Console Configuration (UART, not USB-Serial-JTAG)
+# ============================================
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# ============================================
+# USB Configuration
+# ============================================
+# UART Console (not USB) to avoid linker issues
+# If you want USB Serial JTAG later:
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
 # ============================================
 # Compiler Optimization
 # ============================================
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 
 # ============================================
 # FreeRTOS
 # ============================================
 CONFIG_FREERTOS_HZ=1000
-CONFIG_FREERTOS_UNICORE=y
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=1
 
 # ============================================
 # Logging
 # ============================================
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
-CONFIG_LOG_COLORS=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 
 # ============================================
-# WICHTIG: Serial Console Timeout erhöhen
+# Disable Unused Features (Save Space)
 # ============================================
-CONFIG_ESP_CONSOLE_UART_CUSTOM=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
-CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_BT_ENABLED=n
 
-# Verhindert Timeout beim Boot
-CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
-CONFIG_BOOTLOADER_LOG_LEVEL=3
+# ============================================
+# VFS Support
+# ============================================
+CONFIG_VFS_SUPPORT_IO=y

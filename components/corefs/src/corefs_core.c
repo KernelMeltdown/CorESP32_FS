@@ -1,18 +1,17 @@
 /**
  * CoreFS - Core Implementation
+ * FIXED: Correct crc32() signature
  */
 
 #include "corefs.h"
-#include "corefs_types.h"
 #include "esp_log.h"
-#include "esp_crc.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char* TAG = "corefs";
 
 // Global context (single instance)
-static corefs_ctx_t g_ctx = {0};
+corefs_ctx_t g_ctx = {0};
 
 // Forward declarations (from other files)
 extern esp_err_t corefs_superblock_init(corefs_ctx_t* ctx);
@@ -22,6 +21,14 @@ extern esp_err_t corefs_block_init(corefs_ctx_t* ctx);
 extern void corefs_block_cleanup(corefs_ctx_t* ctx);
 extern esp_err_t corefs_btree_init(corefs_ctx_t* ctx);
 extern esp_err_t corefs_btree_load(corefs_ctx_t* ctx);
+
+// ============================================
+// CONTEXT ACCESSOR
+// ============================================
+
+corefs_ctx_t* corefs_get_context(void) {
+    return &g_ctx;
+}
 
 // ============================================
 // FORMAT
@@ -68,10 +75,9 @@ esp_err_t corefs_format(const esp_partition_t* partition) {
     ctx.sb->mount_count = 0;
     ctx.sb->clean_unmount = 1;
     
-    // Calculate checksum
+    // Calculate checksum (✓ FIXED: correct signature)
     ctx.sb->checksum = 0;
-    ctx.sb->checksum = esp_crc32_le(0, (const uint8_t*)ctx.sb, 
-                                     sizeof(corefs_superblock_t));
+    ctx.sb->checksum = crc32(ctx.sb, sizeof(corefs_superblock_t));
     
     // Write superblock
     esp_err_t ret = esp_partition_erase_range(partition, 0, COREFS_SECTOR_SIZE);
@@ -168,11 +174,10 @@ esp_err_t corefs_mount(const esp_partition_t* partition) {
         return ESP_ERR_INVALID_STATE;
     }
     
-    // Verify checksum
+    // Verify checksum (✓ FIXED: correct signature)
     uint32_t stored_csum = g_ctx.sb->checksum;
     g_ctx.sb->checksum = 0;
-    uint32_t calc_csum = esp_crc32_le(0, (const uint8_t*)g_ctx.sb, 
-                                       sizeof(corefs_superblock_t));
+    uint32_t calc_csum = crc32(g_ctx.sb, sizeof(corefs_superblock_t));
     g_ctx.sb->checksum = stored_csum;
     
     if (stored_csum != calc_csum) {
@@ -240,10 +245,9 @@ esp_err_t corefs_unmount(void) {
     // Mark as clean
     g_ctx.sb->clean_unmount = 1;
     
-    // Update superblock checksum
+    // Update superblock checksum (✓ FIXED: correct signature)
     g_ctx.sb->checksum = 0;
-    g_ctx.sb->checksum = esp_crc32_le(0, (const uint8_t*)g_ctx.sb, 
-                                       sizeof(corefs_superblock_t));
+    g_ctx.sb->checksum = crc32(g_ctx.sb, sizeof(corefs_superblock_t));
     
     // Write superblock
     esp_partition_erase_range(g_ctx.partition, 0, COREFS_SECTOR_SIZE);
@@ -276,66 +280,11 @@ esp_err_t corefs_info(corefs_info_t* info) {
     info->block_size = g_ctx.sb->block_size;
     info->block_count = g_ctx.sb->block_count;
     info->blocks_used = g_ctx.sb->blocks_used;
+    info->mount_count = g_ctx.sb->mount_count;
     
     info->total_bytes = (uint64_t)g_ctx.sb->block_count * COREFS_BLOCK_SIZE;
     info->used_bytes = (uint64_t)g_ctx.sb->blocks_used * COREFS_BLOCK_SIZE;
     info->free_bytes = info->total_bytes - info->used_bytes;
     
     return ESP_OK;
-}
-
-// ============================================
-// MAINTENANCE
-// ============================================
-
-esp_err_t corefs_check(void) {
-    if (!g_ctx.mounted) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    ESP_LOGI(TAG, "Running filesystem check...");
-    
-    // Verify superblock CRC
-    uint32_t stored_csum = g_ctx.sb->checksum;
-    g_ctx.sb->checksum = 0;
-    uint32_t calc_csum = esp_crc32_le(0, (const uint8_t*)g_ctx.sb, 
-                                       sizeof(corefs_superblock_t));
-    g_ctx.sb->checksum = stored_csum;
-    
-    if (stored_csum != calc_csum) {
-        ESP_LOGE(TAG, "Superblock corrupted!");
-        return ESP_ERR_INVALID_CRC;
-    }
-    
-    ESP_LOGI(TAG, "Filesystem check complete - OK");
-    return ESP_OK;
-}
-
-esp_err_t corefs_wear_stats(uint16_t* min_wear, uint16_t* max_wear, uint16_t* avg_wear) {
-    if (!g_ctx.mounted || !g_ctx.wear_table) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    uint16_t min = 0xFFFF;
-    uint16_t max = 0;
-    uint32_t total = 0;
-    uint32_t count = g_ctx.sb->block_count - COREFS_METADATA_BLOCKS;
-    
-    for (uint32_t i = COREFS_METADATA_BLOCKS; i < g_ctx.sb->block_count; i++) {
-        uint16_t wear = g_ctx.wear_table[i];
-        if (wear < min) min = wear;
-        if (wear > max) max = wear;
-        total += wear;
-    }
-    
-    if (min_wear) *min_wear = min;
-    if (max_wear) *max_wear = max;
-    if (avg_wear) *avg_wear = (uint16_t)(total / count);
-    
-    return ESP_OK;
-}
-
-// Export context for other modules
-corefs_ctx_t* corefs_get_context(void) {
-    return &g_ctx;
 }

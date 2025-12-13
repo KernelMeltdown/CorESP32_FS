@@ -10,8 +10,6 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_partition.h"
-
-// CoreFS Headers
 #include "corefs.h"
 
 static const char* TAG = "main";

@@ -1,5 +1,6 @@
 /**
  * corefs_recovery.c - Filesystem Recovery & Consistency Check
+ * FIXED: Uses correct superblock field name (checksum)
  */
 
 #include "corefs.h"
@@ -15,6 +16,10 @@ static const char* TAG = "corefs_recovery";
 #define TXN_OP_WRITE   2
 #define TXN_OP_DELETE  3
 #define TXN_OP_COMMIT  4
+
+// External declarations
+extern corefs_ctx_t* corefs_get_context(void);
+extern esp_err_t corefs_block_read(corefs_ctx_t* ctx, uint32_t block, void* buf);
 
 // ============================================================================
 // RECOVERY SCAN (called during mount on unclean shutdown)
@@ -73,11 +78,11 @@ esp_err_t corefs_recovery_scan(corefs_ctx_t* ctx) {
     
     free(txn_log);
     
-    // Verify superblock CRC
-    uint32_t stored_csum = ctx->sb->crc32;
-    ctx->sb->crc32 = 0;
+    // Verify superblock CRC (✓ FIXED: checksum field)
+    uint32_t stored_csum = ctx->sb->checksum;
+    ctx->sb->checksum = 0;
     uint32_t calc_csum = crc32(ctx->sb, sizeof(corefs_superblock_t));
-    ctx->sb->crc32 = stored_csum;
+    ctx->sb->checksum = stored_csum;
     
     if (stored_csum != calc_csum) {
         ESP_LOGE(TAG, "Superblock CRC corrupted: 0x%08lX != 0x%08lX", 
@@ -96,10 +101,9 @@ esp_err_t corefs_recovery_scan(corefs_ctx_t* ctx) {
 // ============================================================================
 
 esp_err_t corefs_check(void) {
-    // Get global context
-    extern corefs_ctx_t g_ctx;
+    corefs_ctx_t* ctx = corefs_get_context();
     
-    if (!g_ctx.mounted) {
+    if (!ctx->mounted) {
         ESP_LOGE(TAG, "Filesystem not mounted");
         return ESP_ERR_INVALID_STATE;
     }
@@ -107,18 +111,18 @@ esp_err_t corefs_check(void) {
     ESP_LOGI(TAG, "Running filesystem check (fsck)...");
     
     // Verify superblock
-    if (g_ctx.sb->magic != COREFS_MAGIC) {
-        ESP_LOGE(TAG, "Invalid superblock magic: 0x%lX", g_ctx.sb->magic);
+    if (ctx->sb->magic != COREFS_MAGIC) {
+        ESP_LOGE(TAG, "Invalid superblock magic: 0x%lX", ctx->sb->magic);
         return ESP_ERR_INVALID_STATE;
     }
     
     ESP_LOGI(TAG, "✓ Superblock magic valid");
     
-    // Verify superblock CRC
-    uint32_t stored_crc = g_ctx.sb->crc32;
-    g_ctx.sb->crc32 = 0;
-    uint32_t calc_crc = crc32(g_ctx.sb, sizeof(corefs_superblock_t));
-    g_ctx.sb->crc32 = stored_crc;
+    // Verify superblock CRC (✓ FIXED: checksum field)
+    uint32_t stored_crc = ctx->sb->checksum;
+    ctx->sb->checksum = 0;
+    uint32_t calc_crc = crc32(ctx->sb, sizeof(corefs_superblock_t));
+    ctx->sb->checksum = stored_crc;
     
     if (stored_crc != calc_crc) {
         ESP_LOGE(TAG, "Superblock CRC mismatch: 0x%08lX != 0x%08lX", 
@@ -129,7 +133,7 @@ esp_err_t corefs_check(void) {
     ESP_LOGI(TAG, "✓ Superblock CRC valid");
     
     // Verify wear leveling
-    esp_err_t ret = corefs_wear_check(&g_ctx);
+    esp_err_t ret = corefs_wear_check(ctx);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "⚠ Wear leveling issues detected");
     } else {

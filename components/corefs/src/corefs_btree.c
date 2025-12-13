@@ -1,8 +1,9 @@
 /**
  * CoreFS - B-Tree Directory Index
+ * FIXED: Correct array bounds for entry names
  */
 
-#include "corefs_types.h"
+#include "corefs.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -137,7 +138,10 @@ esp_err_t corefs_btree_insert(corefs_ctx_t* ctx, const char* path, uint32_t inod
     
     // Extract filename
     const char* filename = path + 1;
-    if (strlen(filename) >= COREFS_MAX_FILENAME) {
+    
+    // ✓ FIXED: Check against actual array size (64), not COREFS_MAX_FILENAME (255)
+    if (strlen(filename) >= 64) {
+        ESP_LOGE(TAG, "Filename too long (max 63 chars): %s", filename);
         return ESP_ERR_INVALID_SIZE;
     }
     
@@ -174,8 +178,11 @@ esp_err_t corefs_btree_insert(corefs_ctx_t* ctx, const char* path, uint32_t inod
     int idx = node->count;
     node->entries[idx].inode_block = inode_block;
     node->entries[idx].name_hash = hash;
-    strncpy(node->entries[idx].name, filename, COREFS_MAX_FILENAME - 1);
-    node->entries[idx].name[COREFS_MAX_FILENAME - 1] = '\0';
+    
+    // ✓ FIXED: Use correct array size (64 bytes)
+    strncpy(node->entries[idx].name, filename, 63);
+    node->entries[idx].name[63] = '\0';
+    
     node->count++;
     
     // Write back

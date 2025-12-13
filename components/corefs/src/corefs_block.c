@@ -2,7 +2,8 @@
  * CoreFS - Block Allocation & Management
  */
 
-#include "corefs_types.h"
+#include "corefs.h"
+
 #include "esp_log.h"
 #include "esp_partition.h"
 #include <string.h>
